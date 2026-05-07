@@ -1,0 +1,105 @@
+@import url('https://fonts.googleapis.com/css2?family=Syne:wght@400;500;700;800&family=DM+Sans:wght@300;400;500;700&family=JetBrains+Mono:wght@400;500&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "DM Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-display: "Syne", sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+  
+  --color-brand: #FF4D2D;
+  --color-brand-soft: rgba(255, 77, 45, 0.1);
+  --color-accent: #00C896;
+  --color-accent-soft: rgba(0, 200, 150, 0.1);
+  
+  --color-bg-primary: var(--bg-primary);
+  --color-bg-secondary: var(--bg-secondary);
+  --color-text-primary: var(--text-primary);
+  --color-text-secondary: var(--text-secondary);
+  --color-border-subtle: var(--border-subtle);
+}
+
+:root {
+  --bg-primary: #0D0D0D;
+  --bg-secondary: #141414;
+  --text-primary: #FFFFFF;
+  --text-secondary: #9CA3AF; /* gray-400 */
+  --border-subtle: rgba(255, 255, 255, 0.05);
+}
+
+.light {
+  --bg-primary: #F5F5F7;
+  --bg-secondary: #FFFFFF;
+  --text-primary: #1A1A1A;
+  --text-secondary: #6B7280; /* gray-500 */
+  --border-subtle: rgba(0, 0, 0, 0.08);
+}
+
+/* Light mode utility overrides */
+.light .bg-\[\#0A0A0A\],
+.light .bg-\[\#0D0D0D\],
+.light .bg-bg-primary { background-color: var(--bg-primary); }
+
+.light .bg-\[\#111111\],
+.light .bg-\[\#141414\],
+.light .bg-\[\#1A1A1A\],
+.light .bg-\[\#0F0F0F\],
+.light .bg-bg-secondary { background-color: var(--bg-secondary); }
+
+.light .text-white { color: var(--text-primary) !important; }
+.light .text-gray-200,
+.light .text-text-primary { color: var(--text-primary); }
+
+.light .text-gray-400,
+.light .text-gray-500,
+.light .text-text-secondary { color: var(--text-secondary); }
+
+.light .border-white\/5,
+.light .border-white\/10,
+.light .border-border-subtle { border-color: var(--border-subtle); }
+
+.light .glass {
+  @apply bg-white/40 backdrop-blur-xl border border-black/10 shadow-sm;
+}
+
+.light .bg-white\/5 { background-color: rgba(0, 0, 0, 0.04); }
+.light .bg-white\/10 { background-color: rgba(0, 0, 0, 0.08); }
+.light .bg-white\/20 { background-color: rgba(0, 0, 0, 0.12); }
+.light .bg-white\/40 { background-color: rgba(0, 0, 0, 0.2); }
+
+.light .text-white\/5 { color: rgba(0, 0, 0, 0.04); }
+.light .text-white\/10 { color: rgba(0, 0, 0, 0.08); }
+.light .text-white\/20 { color: rgba(0, 0, 0, 0.15); }
+.light .text-white\/40 { color: rgba(0, 0, 0, 0.3); }
+.light .text-white\/60 { color: rgba(0, 0, 0, 0.5); }
+.light .text-white\/80 { color: rgba(0, 0, 0, 0.7); }
+
+@layer base {
+  body {
+    @apply bg-bg-primary text-text-primary font-sans antialiased transition-colors duration-300;
+  }
+}
+
+.glass {
+  @apply bg-white/5 backdrop-blur-xl border border-white/10;
+}
+
+.niche-input {
+  @apply w-full bg-[#1A1A1A] border-brand shadow-[0_0_0_2px_rgba(255,77,45,0.1)] rounded-xl px-5 py-4 text-white focus:outline-none focus:ring-2 focus:ring-brand/50 transition-all text-lg;
+}
+
+.custom-scrollbar::-webkit-scrollbar {
+  width: 4px;
+  height: 4px;
+}
+
+.custom-scrollbar::-webkit-scrollbar-track {
+  @apply bg-transparent;
+}
+
+.custom-scrollbar::-webkit-scrollbar-thumb {
+  @apply bg-white/10 rounded-full;
+}
+
+.custom-scrollbar::-webkit-scrollbar-thumb:hover {
+  @apply bg-brand/50;
+}
