@@ -6,7 +6,10 @@
 import { GoogleGenAI, Type, FunctionDeclaration } from "@google/genai";
 import { UserPreferences, AIContentCalendar, Platform, ChatMessage } from "../types";
 
-const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+// Use import.meta.env for Vite (Vercel/Netlify) or process.env for Node environments
+const apiKey = import.meta.env.VITE_GEMINI_API_KEY || process.env.GEMINI_API_KEY || '';
+
+const ai = new GoogleGenAI({ apiKey });
 
 const updateRoadmapDaysTool: FunctionDeclaration = {
   name: "update_roadmap_days",

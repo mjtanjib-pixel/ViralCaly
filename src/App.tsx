@@ -35,6 +35,7 @@ import {
   Send,
   X,
   Bot,
+  AlertCircle,
   FileText,
   Link,
   LogIn,
@@ -158,6 +159,7 @@ export default function App() {
   const [user, setUser] = useState<any>(null);
   const [profile, setProfile] = useState<any>(null);
   const [authLoading, setAuthLoading] = useState(true);
+  const [authTimeout, setAuthTimeout] = useState(false);
   const [profileModalOpen, setProfileModalOpen] = useState(false);
   const [isUpdatingProfile, setIsUpdatingProfile] = useState(false);
   const [addMonthModalOpen, setAddMonthModalOpen] = useState(false);
@@ -337,9 +339,18 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
+    const timeout = setTimeout(() => {
+      setAuthTimeout(true);
+    }, 8000);
+
     supabase.auth.getSession().then(({ data: { session } }) => {
+      clearTimeout(timeout);
       setUser(session?.user ?? null);
       if (session?.user) fetchProfile(session.user.id);
+      setAuthLoading(false);
+    }).catch(err => {
+      clearTimeout(timeout);
+      console.error('Auth error:', err);
       setAuthLoading(false);
     });
 
@@ -372,11 +383,11 @@ export default function App() {
     try {
       const { error } = await supabase
         .from('profiles')
-        .update({
+        .upsert({
+          id: user.id,
           ...updates,
           updated_at: new Date().toISOString(),
-        })
-        .eq('id', user.id);
+        });
 
       if (error) throw error;
       setProfile({ ...profile, ...updates });
@@ -881,13 +892,50 @@ export default function App() {
 
   if (authLoading) {
     return (
-      <div className="min-h-screen bg-[#0D0D0D] flex items-center justify-center">
-        <Loader2 className="w-8 h-8 text-brand animate-spin" />
+      <div className="min-h-screen bg-[#0D0D0D] flex items-center justify-center flex-col gap-6 p-8 text-center">
+        <div className="relative">
+          <Loader2 className="w-12 h-12 text-brand animate-spin" />
+          <div className="absolute inset-0 bg-brand/20 blur-xl rounded-full animate-pulse" />
+        </div>
+        <div className="space-y-2">
+          <p className="text-[10px] text-gray-500 font-bold uppercase tracking-[0.3em] animate-pulse">Initializing Engine...</p>
+          {authTimeout && (
+            <motion.div 
+              initial={{ opacity: 0, y: 10 }}
+              animate={{ opacity: 1, y: 0 }}
+              className="mt-8 p-4 bg-white/5 border border-white/10 rounded-2xl max-w-xs mx-auto"
+            >
+              <p className="text-[11px] text-gray-400 leading-relaxed italic">
+                Taking longer than usual. Please check your Supabase credentials in Vercel. 
+                Vercel-এ <code className="text-brand">VITE_SUPABASE_URL</code> সেট করেছেন তো?
+              </p>
+            </motion.div>
+          )}
+        </div>
       </div>
     );
   }
 
   if (!user) {
+    if (!import.meta.env.VITE_SUPABASE_URL || import.meta.env.VITE_SUPABASE_URL === 'https://placeholder.supabase.co') {
+      return (
+        <div className="min-h-screen bg-[#0D0D0D] flex flex-col items-center justify-center p-8 text-center">
+          <div className="w-16 h-16 bg-red-500/10 rounded-full flex items-center justify-center mb-6">
+            <AlertCircle className="w-8 h-8 text-red-500" />
+          </div>
+          <h2 className="text-2xl font-display font-black text-white italic uppercase tracking-tighter mb-4">Supabase missing!</h2>
+          <p className="text-gray-400 text-sm max-w-md leading-relaxed mb-8">
+            It looks like you haven't connected Supabase yet. Vercel-এ এটি কাজ করানোর জন্য <code className="text-brand">VITE_SUPABASE_URL</code> এবং <code className="text-brand">VITE_SUPABASE_ANON_KEY</code> এনভায়রনমেন্ট ভেরিয়েবল সেট করতে হবে।
+          </p>
+          <a 
+            href="/settings" 
+            className="px-8 py-4 bg-white text-black font-black text-[11px] uppercase tracking-widest rounded-xl hover:bg-brand hover:text-white transition-all shadow-xl shadow-brand/20"
+          >
+            Go to Settings
+          </a>
+        </div>
+      );
+    }
     return <SupabaseAuth />;
   }
 
@@ -2644,92 +2692,110 @@ export default function App() {
 
       {/* Profile Modal */}
       <AnimatePresence>
-          {profileModalOpen && (
-            <div className="fixed inset-0 z-[200] flex items-center justify-center p-4">
-              <motion.div 
-                initial={{ opacity: 0 }}
-                animate={{ opacity: 1 }}
-                exit={{ opacity: 0 }}
-                onClick={() => setProfileModalOpen(false)}
-                className="absolute inset-0 bg-black/80 backdrop-blur-sm"
-              />
-              <motion.div 
-                initial={{ opacity: 0, scale: 0.9, y: 20 }}
-                animate={{ opacity: 1, scale: 1, y: 0 }}
-                exit={{ opacity: 0, scale: 0.9, y: 20 }}
-                className="relative bg-[#111111] border border-white/10 w-full max-w-md rounded-[32px] p-8 shadow-2xl overflow-hidden"
-              >
-                <div className="absolute top-0 right-0 w-32 h-32 bg-brand/5 rounded-full -mr-16 -mt-16 blur-2xl" />
-                
-                <div className="flex justify-between items-start mb-8">
-                  <div>
-                    <h3 className="text-3xl font-display font-black text-white italic uppercase tracking-tighter leading-none mb-2">My Profile</h3>
-                    <p className="text-[10px] text-gray-500 font-bold uppercase tracking-[0.2em]">Update your identity</p>
-                  </div>
-                  <button onClick={() => setProfileModalOpen(false)} className="p-2 hover:bg-white/5 rounded-full transition-colors">
-                    <X className="w-5 h-5 text-gray-500" />
-                  </button>
+        {profileModalOpen && (
+          <div className="fixed inset-0 z-[999] flex items-center justify-center p-4">
+            <motion.div 
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setProfileModalOpen(false)}
+              className="absolute inset-0 bg-black/95 backdrop-blur-md"
+            />
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.9, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.9, y: 20 }}
+              className="relative bg-[#0F0F0F] border border-white/10 w-full max-w-lg rounded-[40px] p-10 shadow-2xl shadow-black/50 overflow-hidden"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="absolute top-0 right-0 w-48 h-48 bg-brand/10 rounded-full -mr-24 -mt-24 blur-3xl p-10" />
+              
+              <div className="flex justify-between items-start mb-10">
+                <div>
+                  <h3 className="text-4xl font-display font-black text-white italic uppercase tracking-tighter leading-none mb-2">My Profile</h3>
+                  <p className="text-[11px] text-gray-500 font-bold uppercase tracking-[0.25em]">Warrior Identity Dashboard</p>
                 </div>
+                <button 
+                  onClick={() => setProfileModalOpen(false)} 
+                  className="p-3 bg-white/5 hover:bg-white/10 rounded-2xl transition-all border border-white/5"
+                >
+                  <X className="w-6 h-6 text-gray-400" />
+                </button>
+              </div>
 
-                <form onSubmit={(e) => {
-                  e.preventDefault();
-                  const formData = new FormData(e.currentTarget);
-                  updateProfile({
-                    full_name: formData.get('full_name'),
-                    bio: formData.get('bio'),
-                    website: formData.get('website'),
-                  });
-                }} className="space-y-6">
-                  <div className="space-y-4">
-                    <div>
-                      <label className="text-[10px] font-black text-gray-500 uppercase tracking-widest block mb-2 px-1">Full Name</label>
+              <form onSubmit={(e) => {
+                e.preventDefault();
+                const formData = new FormData(e.currentTarget);
+                updateProfile({
+                  full_name: formData.get('full_name'),
+                  bio: formData.get('bio'),
+                  website: formData.get('website'),
+                });
+              }} className="space-y-8">
+                <div className="space-y-6">
+                  <div>
+                    <label className="text-[10px] font-black text-gray-500 uppercase tracking-widest block mb-3 px-1">Display Name</label>
+                    <div className="relative group">
+                      <div className="absolute inset-0 bg-brand/5 rounded-2xl group-hover:bg-brand/10 transition-colors" />
                       <input 
                         name="full_name"
                         defaultValue={profile?.full_name || ''}
-                        className="w-full bg-white/5 border border-white/10 rounded-2xl px-5 py-4 text-sm text-white focus:outline-none focus:border-brand/40 transition-all font-medium"
-                        placeholder="e.g. Content King"
+                        className="relative w-full bg-transparent border border-white/5 rounded-2xl px-6 py-5 text-base text-white focus:outline-none focus:border-brand/50 transition-all font-bold placeholder:text-gray-700"
+                        placeholder="e.g. Master Content Creator"
                       />
                     </div>
-                    
-                    <div>
-                      <label className="text-[10px] font-black text-gray-500 uppercase tracking-widest block mb-2 px-1">Bio / Tagline</label>
+                  </div>
+                  
+                  <div>
+                    <label className="text-[10px] font-black text-gray-500 uppercase tracking-widest block mb-3 px-1">Bio / Journey Path</label>
+                    <div className="relative group">
+                      <div className="absolute inset-0 bg-brand/5 rounded-2xl group-hover:bg-brand/10 transition-colors" />
                       <textarea 
                         name="bio"
                         defaultValue={profile?.bio || ''}
                         rows={3}
-                        className="w-full bg-white/5 border border-white/10 rounded-2xl px-5 py-4 text-sm text-white focus:outline-none focus:border-brand/40 transition-all font-medium resize-none"
-                        placeholder="Briefly describe your content journey..."
-                      />
-                    </div>
-
-                    <div>
-                      <label className="text-[10px] font-black text-gray-500 uppercase tracking-widest block mb-2 px-1">Website / Portfolio</label>
-                      <input 
-                        name="website"
-                        defaultValue={profile?.website || ''}
-                        className="w-full bg-white/5 border border-white/10 rounded-2xl px-5 py-4 text-sm text-white focus:outline-none focus:border-brand/40 transition-all font-medium"
-                        placeholder="https://yourportfolio.com"
+                        className="relative w-full bg-transparent border border-white/5 rounded-2xl px-6 py-5 text-base text-white focus:outline-none focus:border-brand/50 transition-all font-bold resize-none placeholder:text-gray-700"
+                        placeholder="Define your content vision for the AI engine..."
                       />
                     </div>
                   </div>
 
+                  <div>
+                    <label className="text-[10px] font-black text-gray-500 uppercase tracking-widest block mb-3 px-1">Portfolio Link</label>
+                    <div className="relative group">
+                      <div className="absolute inset-0 bg-brand/5 rounded-2xl group-hover:bg-brand/10 transition-colors" />
+                      <div className="absolute left-6 top-1/2 -translate-y-1/2">
+                        <Link className="w-4 h-4 text-brand" />
+                      </div>
+                      <input 
+                        name="website"
+                        defaultValue={profile?.website || ''}
+                        className="relative w-full bg-transparent border border-white/5 rounded-2xl pl-14 pr-6 py-5 text-sm text-white focus:outline-none focus:border-brand/50 transition-all font-bold placeholder:text-gray-700"
+                        placeholder="https://yourchannel.com"
+                      />
+                    </div>
+                  </div>
+                </div>
+
+                <div className="flex gap-4 pt-4">
                   <button 
                     type="submit"
                     disabled={isUpdatingProfile}
-                    className="w-full py-5 bg-brand text-white font-black text-[11px] uppercase tracking-[0.2em] rounded-2xl hover:brightness-110 active:scale-[0.98] transition-all shadow-xl shadow-brand/20 disabled:opacity-50 italic flex items-center justify-center gap-2"
+                    className="flex-1 py-6 bg-brand text-white font-black text-xs uppercase tracking-[0.25em] rounded-[24px] hover:brightness-110 active:scale-[0.98] transition-all shadow-2xl shadow-brand/30 disabled:opacity-50 italic flex items-center justify-center gap-3"
                   >
                     {isUpdatingProfile ? (
-                      <Loader2 className="w-4 h-4 animate-spin" />
+                      <Loader2 className="w-5 h-5 animate-spin" />
                     ) : (
-                      <Sparkles className="w-3 h-3 fill-current" />
+                      <Sparkles className="w-4 h-4 fill-current" />
                     )}
-                    {isUpdatingProfile ? 'Saving Changes...' : 'Synchronize Identity'}
+                    {isUpdatingProfile ? 'Processing...' : 'Sync Identity'}
                   </button>
-                </form>
-              </motion.div>
-            </div>
-          )}
-        </AnimatePresence>
+                </div>
+              </form>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }
