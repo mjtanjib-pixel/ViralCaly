@@ -40,7 +40,8 @@ import {
   Link,
   LogIn,
   LogOut,
-  User
+  User,
+  Check
 } from "lucide-react";
 import { supabase } from "./lib/supabase";
 import { 
@@ -57,6 +58,13 @@ import {
 import { UserPreferences, AIContentCalendar, ContentStyle, Goal, Platform, Project, SavedScript, LongTermPlan, PlanDay, ChatMessage } from "./types";
 import { generateContentCalendar, generateFullScript, chatWithAI } from "./services/geminiService";
 import { LANGUAGES } from "./constants";
+
+// --- Helpers ---
+const truncateText = (text: string, limit: number = 40) => {
+  if (!text) return "";
+  if (text.length <= limit) return text;
+  return text.substring(0, limit) + "...";
+};
 
 // --- Constants ---
 const LOADING_MESSAGES = [
@@ -147,6 +155,7 @@ export default function App() {
   const [planPickerOpen, setPlanPickerOpen] = useState(false);
   const [selectedPlanForAdd, setSelectedPlanForAdd] = useState<string>("");
   const [selectedMonthForAdd, setSelectedMonthForAdd] = useState<number>(1);
+  const [selectedDayForAdd, setSelectedDayForAdd] = useState<number>(1);
   const [isAddingToPlan, setIsAddingToPlan] = useState(false);
   const [newPlanModalOpen, setNewPlanModalOpen] = useState(false);
   const [newPlanName, setNewPlanName] = useState("");
@@ -155,6 +164,8 @@ export default function App() {
   const [newPlanStartMonth, setNewPlanStartMonth] = useState<number>(1);
   const [newPlanType, setNewPlanType] = useState<"new" | "select">("new");
   const [targetExistingPlanId, setTargetExistingPlanId] = useState("");
+  const [stagedMapping, setStagedMapping] = useState<Record<number, { title: string, hook: string }>>({});
+  const [selectedIdeaForMapping, setSelectedIdeaForMapping] = useState<number | null>(null);
   const [theme, setTheme] = useState<"dark" | "light">("dark");
   const [user, setUser] = useState<any>(null);
   const [profile, setProfile] = useState<any>(null);
@@ -164,6 +175,38 @@ export default function App() {
   const [isUpdatingProfile, setIsUpdatingProfile] = useState(false);
   const [addMonthModalOpen, setAddMonthModalOpen] = useState(false);
   const [addMonthProjectId, setAddMonthProjectId] = useState("");
+  const [markedIdeas, setMarkedIdeas] = useState<number[]>([]);
+  const [isPickingIdea, setIsPickingIdea] = useState(false);
+  const [targetPlanDay, setTargetPlanDay] = useState<{planId: string, date: string} | null>(null);
+  const assignIdeaToPlanDay = (ideaDay: number) => {
+    if (!targetPlanDay || !calendar) return;
+
+    const idea = calendar.calendar.find(i => i.day === ideaDay);
+    if (!idea) return;
+
+    setPlans(prev => {
+      const updated = prev.map(p => {
+        if (p.id === targetPlanDay.planId) {
+          const newDays = [...p.days];
+          const existingIdx = newDays.findIndex(d => d.date === targetPlanDay.date);
+          if (existingIdx >= 0) {
+            newDays[existingIdx] = { ...newDays[existingIdx], title: idea.title, notes: idea.hook };
+          } else {
+            newDays.push({ date: targetPlanDay.date, title: idea.title, notes: idea.hook });
+          }
+          return { ...p, days: newDays };
+        }
+        return p;
+      });
+      localStorage.setItem("viral_caly_plans", JSON.stringify(updated));
+      return updated;
+    });
+
+    setIsPickingIdea(false);
+    setTargetPlanDay(null);
+    // Optionally remove from markedIdeas if user wants only one placement
+    // setMarkedIdeas(prev => prev.filter(id => id !== ideaDay));
+  };
   
   // AI Chat State
   const [chatOpen, setChatOpen] = useState(false);
@@ -277,20 +320,25 @@ export default function App() {
     const plan = plans.find(p => p.id === selectedPlanForAdd);
     if (!plan) return;
 
-    const startDay = (selectedMonthForAdd - 1) * 30 + 1;
-    const endDay = selectedMonthForAdd * 30;
+    // The absolute day offset in the roadmap (1-indexed)
+    const startDay = (selectedMonthForAdd - 1) * 30 + selectedDayForAdd;
     
-    const datesInMonth: string[] = [];
-    for (let i = startDay; i <= endDay; i++) {
+    // Filter items to add
+    const itemsToAdd = markedIdeas.length > 0 
+      ? calendar.calendar.filter(i => markedIdeas.includes(i.day)) 
+      : calendar.calendar.slice(0, 30);
+
+    const targetDates: string[] = [];
+    for (let i = 0; i < itemsToAdd.length; i++) {
         const d = new Date(plan.startDate);
-        d.setDate(d.getDate() + i - 1);
-        datesInMonth.push(d.toISOString().split('T')[0]);
+        d.setDate(d.getDate() + (startDay + i) - 1);
+        targetDates.push(d.toISOString().split('T')[0]);
     }
 
-    const isMonthOccupied = plan.days.some(day => datesInMonth.includes(day.date) && day.title.trim() !== "");
+    const isSlotOccupied = plan.days.some(day => targetDates.includes(day.date) && day.title.trim() !== "");
 
-    if (isMonthOccupied) {
-        alert("This month already has a plan. You cannot add another one to it.");
+    if (isSlotOccupied && markedIdeas.length === 0) {
+        alert("Some days in this range already have a plan. You cannot overwrite them with a batch add.");
         return;
     }
 
@@ -298,19 +346,17 @@ export default function App() {
       const updated = prev.map(p => {
         if (p.id === selectedPlanForAdd) {
             let newDays = [...p.days];
-            calendar.calendar.forEach((item, index) => {
-                if (index < 30) {
-                    const targetDate = datesInMonth[index];
-                    const existingIdx = newDays.findIndex(d => d.date === targetDate);
-                    if (existingIdx >= 0) {
-                        newDays[existingIdx] = { ...newDays[existingIdx], title: item.title, notes: item.hook };
-                    } else {
-                        newDays.push({ date: targetDate, title: item.title, notes: item.hook });
-                    }
+            itemsToAdd.forEach((item, index) => {
+                const targetDate = targetDates[index];
+                const existingIdx = newDays.findIndex(d => d.date === targetDate);
+                if (existingIdx >= 0) {
+                    newDays[existingIdx] = { ...newDays[existingIdx], title: item.title, notes: item.hook };
+                } else {
+                    newDays.push({ date: targetDate, title: item.title, notes: item.hook });
                 }
             });
 
-            // Update assignments
+            // Update assignments - optionally assign to the start month
             const project = projects.find(proj => proj.calendar === calendar);
             let newAssignments = [...(p.assignments || [])];
             if (project) {
@@ -330,7 +376,7 @@ export default function App() {
       return updated;
     });
 
-    alert(`Successfully added to ${plan.name} - Month ${selectedMonthForAdd}`);
+    alert(`Successfully added to ${plan.name} starting Month ${selectedMonthForAdd}, Day ${selectedDayForAdd}`);
     setPlanPickerOpen(false);
   };
 
@@ -362,6 +408,49 @@ export default function App() {
 
     return () => subscription.unsubscribe();
   }, []);
+
+  const loadDataFromSupabase = async (userId: string) => {
+    try {
+      // Load Projects
+      const { data: projData, error: projErr } = await supabase
+        .from('projects')
+        .select('*')
+        .eq('user_id', userId)
+        .order('created_at', { ascending: false });
+      
+      if (projErr) throw projErr;
+      if (projData) setProjects(projData as any[]);
+
+      // Load Scripts
+      const { data: scriptData, error: scriptErr } = await supabase
+        .from('scripts')
+        .select('*')
+        .eq('user_id', userId)
+        .order('created_at', { ascending: false });
+
+      if (scriptErr) throw scriptErr;
+      if (scriptData) setScripts(scriptData as any[]);
+
+      // Load Plans
+      const { data: planData, error: planErr } = await supabase
+        .from('plans')
+        .select('*')
+        .eq('user_id', userId)
+        .order('created_at', { ascending: false });
+
+      if (planErr) throw planErr;
+      if (planData) setPlans(planData as any[]);
+
+    } catch (err) {
+      console.error('Error loading data from Supabase:', err);
+    }
+  };
+
+  useEffect(() => {
+    if (user) {
+      loadDataFromSupabase(user.id);
+    }
+  }, [user]);
 
   const fetchProfile = async (userId: string) => {
     try {
@@ -472,6 +561,18 @@ export default function App() {
       setProjects(updatedProjects);
       localStorage.setItem("viral_caly_projects", JSON.stringify(updatedProjects));
 
+      // Save to Supabase if logged in
+      if (user) {
+        await supabase.from('projects').insert({
+          id: newProject.id,
+          user_id: user.id,
+          name: newProject.name,
+          preferences: newProject.preferences,
+          calendar: newProject.calendar,
+          created_at: newProject.createdAt
+        });
+      }
+
       setView("dashboard");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to generate calendar");
@@ -507,12 +608,20 @@ export default function App() {
     }
   };
 
-  const updateProject = (id: string, newCalendar: AIContentCalendar) => {
+  const updateProject = async (id: string, newCalendar: AIContentCalendar) => {
     setProjects(prev => {
       const updated = prev.map(p => p.id === id ? { ...p, calendar: newCalendar } : p);
       localStorage.setItem("viral_caly_projects", JSON.stringify(updated));
       return updated;
     });
+
+    if (user) {
+      await supabase
+        .from('projects')
+        .update({ calendar: newCalendar })
+        .eq('id', id)
+        .eq('user_id', user.id);
+    }
   };
 
   const fallbackCopyTextToClipboard = (text: string) => {
@@ -538,36 +647,66 @@ export default function App() {
     copyToClipboard(tagString);
   };
 
-  const deleteProject = (id: string, e: React.MouseEvent) => {
+  const deleteProject = async (id: string, e: React.MouseEvent) => {
     e.stopPropagation();
+    if (!window.confirm("Delete this project?")) return;
+
     setProjects(prev => {
       const updated = prev.filter(p => p.id !== id);
       localStorage.setItem("viral_caly_projects", JSON.stringify(updated));
       return updated;
     });
+
+    if (user) {
+      await supabase
+        .from('projects')
+        .delete()
+        .eq('id', id)
+        .eq('user_id', user.id);
+    }
   };
 
-  const deleteScript = (id: string) => {
+  const deleteScript = async (id: string) => {
     setScripts(prev => {
       const updated = prev.filter(s => s.id !== id);
       localStorage.setItem("viral_caly_scripts", JSON.stringify(updated));
       return updated;
     });
     setEditingScript(null);
+
+    if (user) {
+      await supabase
+        .from('scripts')
+        .delete()
+        .eq('id', id)
+        .eq('user_id', user.id);
+    }
   };
 
-  const updateScript = () => {
+  const updateScript = async () => {
     if (!editingScript) return;
     setScripts(prev => {
       const updated = prev.map(s => s.id === editingScript.id ? editingScript : s);
       localStorage.setItem("viral_caly_scripts", JSON.stringify(updated));
       return updated;
     });
+
+    if (user) {
+      await supabase
+        .from('scripts')
+        .update({
+          title: editingScript.title,
+          content: editingScript.content
+        })
+        .eq('id', editingScript.id)
+        .eq('user_id', user.id);
+    }
+
     alert("Script updated successfully!");
     setEditingScript(null);
   };
 
-  const createPlan = (name: string, months: number, projectId?: string, startMonth: number = 1) => {
+  const createPlan = async (name: string, months: number, projectId?: string, startMonth: number = 1, manualMapping?: Record<number, { title: string, hook: string }>) => {
     const startDate = new Date();
     const newPlan: LongTermPlan = {
       id: crypto.randomUUID(),
@@ -579,19 +718,23 @@ export default function App() {
       assignments: []
     };
 
-    // If project is selected, assign it and populate days
-    if (projectId) {
+    const initialDays: PlanDay[] = [];
+    const startDayOffset = (startMonth - 1) * 30;
+
+    // Use manual mapping if provided, otherwise auto-fill from project
+    if (manualMapping) {
+      Object.entries(manualMapping).forEach(([relDayIdx, data]) => {
+        const d = new Date(startDate);
+        d.setDate(d.getDate() + startDayOffset + parseInt(relDayIdx));
+        initialDays.push({
+          date: d.toISOString().split('T')[0],
+          title: data.title,
+          notes: data.hook
+        });
+      });
+    } else if (projectId) {
       const project = projects.find(p => p.id === projectId);
       if (project && project.calendar) {
-        newPlan.assignments = [{
-          month: startMonth,
-          projectId: project.id,
-          projectName: project.name
-        }];
-
-        const startDayOffset = (startMonth - 1) * 30;
-        const initialDays: PlanDay[] = [];
-        
         project.calendar.calendar.forEach((item, index) => {
           if (index < 30) {
             const d = new Date(startDate);
@@ -603,15 +746,41 @@ export default function App() {
             });
           }
         });
-        newPlan.days = initialDays;
       }
     }
+
+    if (projectId) {
+      const project = projects.find(p => p.id === projectId);
+      if (project) {
+        newPlan.assignments = [{
+          month: startMonth,
+          projectId: project.id,
+          projectName: project.name
+        }];
+      }
+    }
+
+    newPlan.days = initialDays;
 
     setPlans(prev => {
       const updated = [newPlan, ...prev];
       localStorage.setItem("viral_caly_plans", JSON.stringify(updated));
       return updated;
     });
+
+    if (user) {
+      await supabase.from('plans').insert({
+        id: newPlan.id,
+        user_id: user.id,
+        name: newPlan.name,
+        start_date: newPlan.startDate,
+        months: newPlan.months,
+        days: newPlan.days,
+        assignments: newPlan.assignments,
+        created_at: newPlan.createdAt
+      });
+    }
+
     setSelectedPlan(newPlan);
   };
 
@@ -625,35 +794,31 @@ export default function App() {
           const updatedPlan = { ...p, months: nextMonth };
           
           if (project && project.calendar) {
-            // Add assignment
             const newAssignments = [...(p.assignments || [])];
-            newAssignments.push({
-              month: nextMonth,
-              projectId: project.id,
-              projectName: project.name
-            });
+            newAssignments.push({ month: nextMonth, projectId: project.id, projectName: project.name });
             updatedPlan.assignments = newAssignments;
-            
-            // Add days
             const startDayOffset = (nextMonth - 1) * 30;
             const newDays = [...p.days];
             project.calendar.calendar.forEach((item, index) => {
               if (index < 30) {
                 const d = new Date(p.startDate);
                 d.setDate(d.getDate() + startDayOffset + index);
-                newDays.push({
-                  date: d.toISOString().split('T')[0],
-                  title: item.title,
-                  notes: item.hook
-                });
+                newDays.push({ date: d.toISOString().split('T')[0], title: item.title, notes: item.hook });
               }
             });
             updatedPlan.days = newDays;
           }
+          if (selectedPlan?.id === p.id) setSelectedPlan(updatedPlan);
           
-          if (selectedPlan?.id === p.id) {
-            setSelectedPlan(updatedPlan);
+          // Sync to Supabase
+          if (user) {
+            supabase.from('plans').update({ 
+               months: updatedPlan.months, 
+               days: updatedPlan.days, 
+               assignments: updatedPlan.assignments 
+            }).eq('id', planId).eq('user_id', user.id).then();
           }
+          
           return updatedPlan;
         }
         return p;
@@ -666,7 +831,7 @@ export default function App() {
     setAddMonthProjectId("");
   };
 
-  const deleteMonthFromPlan = (planId: string, mIndex: number) => {
+  const deleteMonthFromPlan = async (planId: string, mIndex: number) => {
     setPlans(prev => {
       const updated = prev.map(p => {
         if (p.id === planId) {
@@ -674,7 +839,6 @@ export default function App() {
           const startDay = mIndex * 30 + 1;
           const endDay = (mIndex + 1) * 30;
           
-          // Remove days for this month and shift subsequent days
           let newDays = p.days.filter(day => {
             const planStart = new Date(p.startDate).getTime();
             const dayDate = new Date(day.date).getTime();
@@ -694,7 +858,6 @@ export default function App() {
             return day;
           });
 
-          // Handle assignments
           let newAssignments = (p.assignments || []).filter(a => a.month !== monthNum);
           newAssignments = newAssignments.map(a => {
             if (a.month > monthNum) {
@@ -713,6 +876,15 @@ export default function App() {
           if (selectedPlan?.id === planId) {
             setSelectedPlan(updatedPlan);
           }
+
+          if (user) {
+            supabase.from('plans').update({ 
+               months: updatedPlan.months, 
+               days: updatedPlan.days, 
+               assignments: updatedPlan.assignments 
+            }).eq('id', planId).eq('user_id', user.id).then();
+          }
+
           return updatedPlan;
         }
         return p;
@@ -722,7 +894,7 @@ export default function App() {
     });
   };
 
-  const updatePlanDay = (planId: string, dayDate: string, title: string, notes: string) => {
+  const updatePlanDay = async (planId: string, dayDate: string, title: string, notes: string) => {
     setPlans(prev => {
       const updated = prev.map(p => {
         if (p.id === planId) {
@@ -733,6 +905,13 @@ export default function App() {
           } else {
             newDays.push({ date: dayDate, title, notes });
           }
+          
+          if (user) {
+            supabase.from('plans').update({ 
+               days: newDays 
+            }).eq('id', planId).eq('user_id', user.id).then();
+          }
+
           return { ...p, days: newDays };
         }
         return p;
@@ -742,14 +921,25 @@ export default function App() {
     });
   };
 
-  const deletePlan = (id: string, e: React.MouseEvent) => {
+  const deletePlan = async (id: string, e: React.MouseEvent) => {
     e.stopPropagation();
+    if (!window.confirm("Delete this roadmap?")) return;
+
     setPlans(prev => {
       const updated = prev.filter(p => p.id !== id);
       localStorage.setItem("viral_caly_plans", JSON.stringify(updated));
       return updated;
     });
+
     if (selectedPlan?.id === id) setSelectedPlan(null);
+
+    if (user) {
+      await supabase
+        .from('plans')
+        .delete()
+        .eq('id', id)
+        .eq('user_id', user.id);
+    }
   };
 
   const handleGenerateScript = async (item: any, langOverride?: string) => {
@@ -781,6 +971,18 @@ export default function App() {
         localStorage.setItem("viral_caly_scripts", JSON.stringify(updated));
         return updated;
       });
+
+      if (user) {
+        await supabase.from('scripts').insert({
+          id: newSavedScript.id,
+          user_id: user.id,
+          project_id: newSavedScript.projectId,
+          day: newSavedScript.day,
+          title: newSavedScript.title,
+          content: newSavedScript.content,
+          created_at: newSavedScript.createdAt
+        });
+      }
     } catch (err) {
       alert("Failed to generate script. Please try again.");
     } finally {
@@ -1160,7 +1362,7 @@ export default function App() {
                           value={prefs.style}
                           onChange={e => setPrefs({...prefs, style: e.target.value as ContentStyle})}
                         >
-                          {Object.values(ContentStyle).map(s => <option key={s} value={s}>{s}</option>)}
+                            {Object.values(ContentStyle).map((s, idx) => <option key={`style-${s}-${idx}`} value={s}>{s}</option>)}
                         </select>
                       </div>
                     </div>
@@ -1173,7 +1375,7 @@ export default function App() {
                           value={prefs.goal}
                           onChange={e => setPrefs({...prefs, goal: e.target.value as Goal})}
                         >
-                          {Object.values(Goal).map(g => <option key={g} value={g}>{g}</option>)}
+                            {Object.values(Goal).map((g, idx) => <option key={`goal-${g}-${idx}`} value={g}>{g}</option>)}
                         </select>
                       </div>
                       <div>
@@ -1187,7 +1389,7 @@ export default function App() {
                         />
                         <datalist id="language-options">
                           {LANGUAGES.map(lang => (
-                            <option key={lang} value={lang} />
+                            <option key={`lang-opt-${lang}`} value={lang} />
                           ))}
                         </datalist>
                       </div>
@@ -1276,7 +1478,7 @@ export default function App() {
                                 { title: "Week 3", subtitle: "Viral Surge", desc: calendar.weeklyStrategy.week3, color: "text-[#7F77DD]" },
                                 { title: "Week 4", subtitle: "Monetization", desc: calendar.weeklyStrategy.week4, color: "text-[#EF9F27]" },
                               ].map((w, i) => (
-                                <div key={i} className="bg-[#141414] p-5 rounded-2xl border border-white/5">
+                                <div key={`pillar-${i}`} className="bg-[#141414] p-5 rounded-2xl border border-white/5">
                                   <div className={`text-[10px] font-bold uppercase tracking-widest mb-1 ${w.color}`}>{w.title} // {w.subtitle}</div>
                                   <p className="text-sm text-gray-400 leading-relaxed font-light">{w.desc}</p>
                                 </div>
@@ -1310,7 +1512,7 @@ export default function App() {
                             <h4 className="font-display font-bold text-lg text-white mb-6">Content Pillars</h4>
                             <div className="space-y-3">
                               {calendar.contentPillars.map((p, i) => (
-                                <div key={i} className="group bg-[#141414] p-4 rounded-xl border border-white/5 hover:border-brand/30 transition-all">
+                                <div key={`guideline-${i}`} className="group bg-[#141414] p-4 rounded-xl border border-white/5 hover:border-brand/30 transition-all">
                                    <div className="flex items-center gap-3 mb-2">
                                       <div className="w-1.5 h-1.5 rounded-full bg-brand" />
                                       <h5 className="font-bold text-[13px] text-white italic">{p.title}</h5>
@@ -1367,6 +1569,20 @@ export default function App() {
                       <table className="w-full text-left border-collapse">
                         <thead>
                           <tr className="bg-white/5 border-b border-white/5">
+                            <th className="px-6 py-4 w-10">
+                              <input 
+                                type="checkbox" 
+                                checked={calendar.calendar.length > 0 && markedIdeas.length === calendar.calendar.length}
+                                onChange={(e) => {
+                                  if (e.target.checked) {
+                                    const allDays = calendar.calendar.map(i => i.day);
+                                    setMarkedIdeas(Array.from(new Set(allDays)));
+                                  }
+                                  else setMarkedIdeas([]);
+                                }}
+                                className="w-4 h-4 rounded border-white/10 bg-white/5 accent-brand cursor-pointer"
+                              />
+                            </th>
                             <th className="px-6 py-4 text-[10px] font-bold text-gray-500 uppercase tracking-widest">Day</th>
                             <th className="px-6 py-4 text-[10px] font-bold text-gray-500 uppercase tracking-widest">Format</th>
                             <th className="px-6 py-4 text-[10px] font-bold text-gray-500 uppercase tracking-widest">Viral Concept</th>
@@ -1377,7 +1593,21 @@ export default function App() {
                         </thead>
                         <tbody className="divide-y divide-white/5">
                           {calendar.calendar.map((item, i) => (
-                            <tr key={i} className="group hover:bg-white/[0.02] transition-colors">
+                            <tr key={`idea-row-calendar-${item.day}-${i}`} className={`group hover:bg-white/[0.02] transition-colors ${markedIdeas.includes(item.day) ? 'bg-brand/5' : ''}`}>
+                              <td className="px-6 py-6 border-r border-white/5">
+                                <input 
+                                  type="checkbox" 
+                                  checked={markedIdeas.includes(item.day)}
+                                  onChange={() => {
+                                    setMarkedIdeas(prev => 
+                                      prev.includes(item.day) 
+                                      ? prev.filter(id => id !== item.day) 
+                                      : [...prev, item.day]
+                                    );
+                                  }}
+                                  className="w-4 h-4 rounded border-white/10 bg-white/5 accent-brand cursor-pointer"
+                                />
+                              </td>
                               <td className="px-6 py-6 transition-transform group-hover:translate-x-1">
                                 <div className="w-8 h-8 rounded-full bg-white/5 flex items-center justify-center font-display font-extrabold text-brand italic">
                                   {item.day}
@@ -1415,6 +1645,42 @@ export default function App() {
                         </tbody>
                       </table>
                     </div>
+
+                    {markedIdeas.length > 0 && (
+                      <motion.div 
+                        initial={{ y: 100 }}
+                        animate={{ y: 0 }}
+                        className="fixed bottom-8 left-1/2 -translate-x-1/2 bg-[#1A1A1A] border border-brand/30 px-8 py-4 rounded-full shadow-2xl z-50 flex items-center gap-8 backdrop-blur-xl"
+                      >
+                        <div className="flex items-center gap-3 pr-8 border-r border-white/10">
+                          <div className="w-8 h-8 rounded-lg bg-brand/20 flex items-center justify-center">
+                            <span className="text-brand font-black text-sm">{markedIdeas.length}</span>
+                          </div>
+                          <span className="text-xs font-bold text-white uppercase tracking-widest">Marked Ideas</span>
+                        </div>
+                        <div className="flex items-center gap-4">
+                          <button 
+                            onClick={() => {
+                              if (plans.length === 0) {
+                                alert("Please create a Growth Plan first in the 'Plan' section.");
+                                return;
+                              }
+                              setSelectedPlanForAdd(plans[0].id);
+                              setPlanPickerOpen(true);
+                            }}
+                            className="px-6 py-2 bg-brand text-white text-[10px] font-black uppercase tracking-widest rounded-full hover:opacity-90 transition-all flex items-center gap-2 shadow-lg shadow-brand/20"
+                          >
+                            <PlusCircle className="w-4 h-4" /> Batch Add to Plan
+                          </button>
+                          <button 
+                            onClick={() => setMarkedIdeas([])}
+                            className="text-[10px] font-bold text-gray-500 hover:text-white uppercase tracking-widest transition-colors"
+                          >
+                            Clear All
+                          </button>
+                        </div>
+                      </motion.div>
+                    )}
                   </div>
                 )}
 
@@ -1449,9 +1715,9 @@ export default function App() {
                           </div>
                         ) : (
                           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-                            {plans.map(plan => (
+                            {plans.map((plan, i) => (
                               <motion.div 
-                                key={plan.id}
+                                key={`plan-card-main-${plan.id}-${i}`}
                                 initial={{ opacity: 0, scale: 0.95 }}
                                 animate={{ opacity: 1, scale: 1 }}
                                 whileHover={{ y: -5 }}
@@ -1503,7 +1769,7 @@ export default function App() {
 
                         <div className="flex gap-8 overflow-x-auto pb-12 custom-scrollbar">
                           {Array.from({ length: selectedPlan.months }).map((_, mIndex) => (
-                            <div key={mIndex} className="min-w-[400px] max-w-[400px] bg-bg-secondary border border-border-subtle rounded-[40px] p-8 flex flex-col shadow-2xl shadow-black/10 transition-colors">
+                            <div key={`roadmap-month-${mIndex}`} className="min-w-[400px] max-w-[400px] bg-bg-secondary border border-border-subtle rounded-[40px] p-8 flex flex-col shadow-2xl shadow-black/10 transition-colors">
                               <div className="flex justify-between items-start mb-8 sticky top-0 bg-bg-secondary/90 backdrop-blur-md py-2 z-10">
                                 <div className="flex flex-col">
                                   <h3 className="text-4xl font-display font-black text-brand italic uppercase tracking-tighter leading-none">
@@ -1550,8 +1816,14 @@ export default function App() {
 
                                   return (
                                     <button 
-                                      key={dayNum}
+                                      key={`roadmap-day-${dayNum}-${dateStr}`}
                                       onClick={() => {
+                                        if (!hasContent && markedIdeas.length > 0) {
+                                          setTargetPlanDay({ planId: selectedPlan.id, date: dateStr });
+                                          setIsPickingIdea(true);
+                                          return;
+                                        }
+
                                         // Find which month this day belongs to (1-indexed)
                                         const monthIdx = Math.floor((dayNum - 1) / 30);
                                         const monthNum = monthIdx + 1;
@@ -1608,7 +1880,7 @@ export default function App() {
                           ))}
                           
                           {/* Add Month Option */}
-                          <div className="flex items-center">
+                          <div key="roadmap-add-month-container" className="flex items-center">
                             <motion.button 
                               whileHover={{ scale: 1.02 }}
                               whileTap={{ scale: 0.98 }}
@@ -1712,9 +1984,9 @@ export default function App() {
                              </div>
                            ) : (
                              <div className="grid grid-cols-1 gap-6">
-                               {scripts.map(script => (
+                          {scripts.map((script, i) => (
                                  <motion.div 
-                                   key={script.id}
+                                   key={`script-card-main-${script.id}-${i}`}
                                    initial={{ opacity: 0, y: 10 }}
                                    animate={{ opacity: 1, y: 0 }}
                                    className="bg-[#141414] border border-white/5 p-6 rounded-3xl group hover:border-brand/40 transition-all"
@@ -1838,9 +2110,9 @@ export default function App() {
                        </div>
                      ) : (
                        <div className="grid grid-cols-2 gap-6">
-                         {projects.map(project => (
+                        {projects.map((project, i) => (
                            <motion.div 
-                             key={project.id}
+                             key={`project-card-main-${project.id}-${i}`}
                              whileHover={{ scale: 1.02 }}
                              onClick={() => loadProject(project)}
                              className="bg-[#141414] border border-white/5 p-6 rounded-3xl cursor-pointer group hover:border-brand/40 transition-all relative"
@@ -2069,7 +2341,7 @@ export default function App() {
                               </div>
                               <div className="flex flex-wrap gap-1.5">
                                  {activeDay.hashtags.map((tag, i) => (
-                                 <span key={i} className="text-[10px] text-gray-400 bg-white/5 border border-white/5 px-2 py-1 rounded-md font-medium">#{tag.replace(/^#/, '')}</span>
+                                 <span key={`hashtag-${tag}-${i}`} className="text-[10px] text-gray-400 bg-white/5 border border-white/5 px-2 py-1 rounded-md font-medium">#{tag.replace(/^#/, '')}</span>
                                  ))}
                               </div>
                            </div>
@@ -2188,186 +2460,342 @@ export default function App() {
             </motion.div>
           </div>
         )}
+        <AnimatePresence>
+          {isPickingIdea && calendar && (
+            <div className="fixed inset-0 z-[200] flex items-center justify-center p-6">
+              <motion.div 
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                onClick={() => {
+                  setIsPickingIdea(false);
+                  setTargetPlanDay(null);
+                }}
+                className="absolute inset-0 bg-black/90 backdrop-blur-md"
+              />
+              <motion.div 
+                initial={{ opacity: 0, scale: 0.9, y: 20 }}
+                animate={{ opacity: 1, scale: 1, y: 0 }}
+                exit={{ opacity: 0, scale: 0.9, y: 20 }}
+                className="relative z-[201] bg-bg-secondary w-full max-w-xl rounded-[32px] border border-border-subtle p-8 shadow-2xl overflow-hidden"
+              >
+                <div className="flex justify-between items-center mb-8">
+                  <div>
+                    <h3 className="text-2xl font-display font-black text-white italic uppercase tracking-tighter">Select from Marked Ideas</h3>
+                    <p className="text-[10px] font-bold text-gray-500 uppercase tracking-widest mt-1">Pick an idea to assign to this roadmap slot</p>
+                  </div>
+                  <button 
+                    onClick={() => {
+                      setIsPickingIdea(false);
+                      setTargetPlanDay(null);
+                    }}
+                    className="p-2 bg-white/5 rounded-full hover:bg-white/10 transition-colors"
+                  >
+                    <PlusCircle className="w-6 h-6 text-gray-500 rotate-45" />
+                  </button>
+                </div>
+
+                <div className="max-h-[400px] overflow-y-auto pr-2 custom-scrollbar space-y-3">
+                  {markedIdeas.length === 0 ? (
+                    <div className="text-center py-12 bg-white/5 rounded-2xl border border-dashed border-white/10">
+                      <Sparkles className="w-8 h-8 text-gray-700 mx-auto mb-3" />
+                      <p className="text-xs text-gray-500 font-bold uppercase tracking-widest">No marked ideas yet</p>
+                      <p className="text-[10px] text-gray-600 mt-1">Go to the Calendar view and mark your favorites first.</p>
+                    </div>
+                  ) : (
+                    markedIdeas.map((id, idx) => {
+                      const idea = calendar.calendar.find(i => i.day === id);
+                      if (!idea) return null;
+                      return (
+                        <button 
+                          key={`marked-idea-${id}-${idx}`} 
+                          onClick={() => assignIdeaToPlanDay(id)}
+                          className="w-full p-4 bg-white/5 border border-white/5 rounded-2xl text-left hover:bg-brand/10 hover:border-brand/30 transition-all group flex items-center gap-4"
+                        >
+                          <div className="w-10 h-10 rounded-xl bg-white/5 flex items-center justify-center font-display font-black text-brand italic">
+                            {idea.day}
+                          </div>
+                          <div className="flex-1 min-w-0">
+                            <h4 className="text-sm font-bold text-white group-hover:text-brand transition-colors truncate">{idea.title}</h4>
+                            <p className="text-[10px] text-gray-500 truncate mt-0.5">{idea.hook}</p>
+                          </div>
+                          <ChevronRight className="w-4 h-4 text-gray-700 group-hover:text-brand transition-all" />
+                        </button>
+                      );
+                    })
+                  )}
+                </div>
+              </motion.div>
+            </div>
+          )}
+        </AnimatePresence>
+
         {newPlanModalOpen && (
-          <div className="fixed inset-0 z-[100] flex items-center justify-center p-6">
+          <div className="fixed inset-0 z-[110] flex items-center justify-center p-4 sm:p-8">
             <motion.div 
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
               exit={{ opacity: 0 }}
-              className="absolute inset-0 bg-black/80 backdrop-blur-sm"
-              onClick={() => setNewPlanModalOpen(false)}
+              className="absolute inset-0 bg-black/90 backdrop-blur-md"
+              onClick={() => {
+                setNewPlanModalOpen(false);
+                setStagedMapping({});
+                setSelectedIdeaForMapping(null);
+              }}
             />
             <motion.div 
-              initial={{ opacity: 0, scale: 0.9, y: 20 }}
+              initial={{ opacity: 0, scale: 0.95, y: 20 }}
               animate={{ opacity: 1, scale: 1, y: 0 }}
-              exit={{ opacity: 0, scale: 0.9, y: 20 }}
-              className="relative bg-bg-primary border border-border-subtle w-full max-w-2xl rounded-3xl p-8 shadow-2xl z-[101] grid grid-cols-1 md:grid-cols-2 gap-8"
+              exit={{ opacity: 0, scale: 0.95, y: 20 }}
+              className="relative bg-[#0D0D0D] border border-white/10 w-full max-w-[1200px] max-h-[90vh] rounded-[40px] shadow-2xl z-[111] grid grid-cols-12 overflow-hidden"
             >
-              <div className="space-y-6">
-                <h3 className="text-2xl font-display font-black text-white italic uppercase tracking-tighter mb-2">Create Growth Plan</h3>
-                <p className="text-[10px] font-bold text-gray-500 uppercase tracking-widest leading-relaxed">
-                  Start your long-term content strategy by defining your roadmap and assigning your first project.
-                </p>
-                
-                <div>
-                  <label className="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-3 block">1. Plan Identity</label>
-                  <div className="flex p-1 bg-white/5 rounded-xl mb-4">
-                    <button 
-                      onClick={() => setNewPlanType("new")}
-                      className={`flex-1 py-2 text-[10px] font-black uppercase tracking-widest rounded-lg transition-all ${newPlanType === "new" ? "bg-brand text-white shadow-lg shadow-brand/20" : "text-gray-500 hover:text-gray-300"}`}
-                    >
-                      New Roadmap
-                    </button>
-                    <button 
-                      onClick={() => {
-                        setNewPlanType("select");
-                        if (plans.length > 0 && !targetExistingPlanId) setTargetExistingPlanId(plans[0].id);
-                      }}
-                      className={`flex-1 py-2 text-[10px] font-black uppercase tracking-widest rounded-lg transition-all ${newPlanType === "select" ? "bg-brand text-white shadow-lg shadow-brand/20" : "text-gray-500 hover:text-gray-300"}`}
-                    >
-                      Select Plan
-                    </button>
-                  </div>
-
-                  {newPlanType === "new" ? (
-                    <input 
-                      type="text"
-                      value={newPlanName}
-                      onChange={(e) => setNewPlanName(e.target.value)}
-                      placeholder="e.g. My 12 Month Viral Roadmap"
-                      className="w-full bg-[#1A1A1A] border border-white/5 rounded-xl px-4 py-3 text-sm text-white focus:border-brand/40 outline-none transition-all"
-                    />
-                  ) : (
-                    <select
-                      value={targetExistingPlanId}
-                      onChange={(e) => setTargetExistingPlanId(e.target.value)}
-                      className="w-full bg-[#1A1A1A] border border-white/5 rounded-xl px-4 py-3 text-sm text-white focus:border-brand/40 outline-none transition-all appearance-none cursor-pointer"
-                    >
-                      {plans.length === 0 && <option value="">No plans created yet</option>}
-                      {plans.map(p => (
-                        <option key={p.id} value={p.id}>{p.name} ({p.months}m)</option>
-                      ))}
-                    </select>
-                  )}
+              {/* Column 1: Day Mapping Grid (BAM PASE) */}
+              <div className="col-span-12 lg:col-span-3 border-r border-white/5 bg-[#111111]/50 p-6 sm:p-8 overflow-y-auto custom-scrollbar order-2 lg:order-1">
+                <div className="mb-6">
+                  <h3 className="text-[10px] font-black text-brand uppercase tracking-[0.2em] mb-2">1. Select Destination</h3>
+                  <p className="text-xl font-display font-black text-white italic uppercase leading-none">Day Mapping</p>
+                  <p className="text-[9px] text-gray-500 font-bold uppercase mt-2">Map month {newPlanStartMonth} roadmap</p>
                 </div>
 
-                <div>
-                  <label className="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-3 block">
-                    {newPlanType === "new" ? `2. Roadmap Duration (${newPlanMonths} Months)` : `2. Action: Extend Roadmap (+1 Month)`}
-                  </label>
-                  {newPlanType === "new" ? (
-                    <>
-                      <input 
-                        type="range"
-                        min="1"
-                        max="12"
-                        value={newPlanMonths}
-                        onChange={(e) => {
-                          const val = parseInt(e.target.value);
-                          setNewPlanMonths(val);
-                          if (newPlanStartMonth > val) setNewPlanStartMonth(val);
+                <div className="grid grid-cols-5 gap-2">
+                  {Array.from({ length: 30 }).map((_, i) => {
+                    const isMapped = stagedMapping[i];
+                    return (
+                      <button 
+                        key={`modal-mapping-day-${i}`}
+                        onClick={() => {
+                          if (selectedIdeaForMapping !== null && newPlanProjectId) {
+                            const project = projects.find(p => p.id === newPlanProjectId);
+                            const idea = project?.calendar.calendar[selectedIdeaForMapping];
+                            if (idea) {
+                              setStagedMapping(prev => ({
+                                ...prev,
+                                [i]: { title: idea.title, hook: idea.hook }
+                              }));
+                            }
+                          } else if (isMapped) {
+                            const newMap = { ...stagedMapping };
+                            delete newMap[i];
+                            setStagedMapping(newMap);
+                          }
                         }}
-                        className="w-full accent-brand bg-white/5 h-2 rounded-lg appearance-none cursor-pointer"
-                      />
-                      <div className="flex justify-between mt-2">
-                        <span className="text-[9px] text-gray-600 font-bold">1 M</span>
-                        <span className="text-[9px] text-gray-600 font-bold">12 M</span>
-                      </div>
-                    </>
-                  ) : (
-                    <div className="p-4 bg-brand/5 border border-dashed border-brand/20 rounded-xl text-center">
-                       <p className="text-[10px] text-brand font-bold italic uppercase">Adding Month {plans.find(p => p.id === targetExistingPlanId)?.months ? (plans.find(p => p.id === targetExistingPlanId)!.months + 1) : "..."}</p>
-                    </div>
-                  )}
+                        className={`aspect-square rounded-xl border flex flex-col items-center justify-center transition-all group relative ${
+                          isMapped 
+                          ? 'bg-brand/10 border-brand/50 text-brand' 
+                          : 'bg-white/5 border-white/5 text-gray-600 hover:border-white/20'
+                        }`}
+                      >
+                        <span className="text-[10px] font-black">{i + 1}</span>
+                        {isMapped && (
+                           <div className="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity bg-brand/20 backdrop-blur-sm rounded-xl text-red-500">
+                              <Trash2 className="w-3 h-3" />
+                           </div>
+                        )}
+                        {isMapped && <div className="absolute top-1 right-1 w-1 h-1 rounded-full bg-brand" />}
+                      </button>
+                    );
+                  })}
                 </div>
 
-                <div className="flex gap-4 pt-4">
-                  <button 
-                    onClick={() => setNewPlanModalOpen(false)}
-                    className="flex-1 px-6 py-4 rounded-2xl bg-white/5 text-gray-400 font-bold text-[10px] uppercase tracking-widest hover:text-white transition-colors"
-                  >
-                    Cancel
-                  </button>
+                <div className="mt-8 p-4 bg-white/5 rounded-2xl border border-white/5">
+                   <div className="flex justify-between items-center mb-3">
+                      <span className="text-[9px] font-bold text-gray-500 uppercase tracking-widest">Selected Item</span>
+                   </div>
+                   {selectedIdeaForMapping !== null ? (
+                      <div className="p-3 bg-brand/10 rounded-xl border border-brand/20">
+                         <p className="text-[10px] text-white font-black italic line-clamp-2">
+                           {projects.find(p => p.id === newPlanProjectId)?.calendar.calendar[selectedIdeaForMapping].title}
+                         </p>
+                         <p className="text-[8px] text-brand font-bold uppercase mt-1">Ready to map</p>
+                      </div>
+                   ) : (
+                      <p className="text-[9px] text-gray-700 italic">Select an idea on the right first...</p>
+                   )}
+                </div>
+              </div>
+
+              {/* Column 2: Plan Identity & Config (CENTER) */}
+              <div className="col-span-12 lg:col-span-5 p-8 sm:p-10 flex flex-col bg-black overflow-y-auto custom-scrollbar order-1 lg:order-2">
+                <div className="flex-1 space-y-10">
+                  <header>
+                    <h3 className="font-display font-black text-5xl sm:text-6xl text-white italic tracking-tighter uppercase leading-[0.8] mb-4">
+                      Create<br/><span className="text-brand">Growth</span><br/>Plan
+                    </h3>
+                    <p className="text-gray-500 text-sm font-medium leading-relaxed max-w-[320px]">
+                      Build your roadmap by mapping strategic content to specific days.
+                    </p>
+                  </header>
+
+                  <div className="space-y-8">
+                    <div>
+                      <div className="flex p-1 bg-white/10 rounded-2xl mb-6">
+                        <button 
+                          onClick={() => setNewPlanType("new")}
+                          className={`flex-1 py-3 text-[10px] font-black uppercase tracking-widest rounded-xl transition-all ${newPlanType === "new" ? "bg-brand text-white shadow-lg shadow-brand/20" : "text-gray-500 hover:text-gray-300"}`}
+                        >
+                          New Roadmap
+                        </button>
+                        <button 
+                          onClick={() => {
+                            setNewPlanType("select");
+                            if (plans.length > 0 && !targetExistingPlanId) setTargetExistingPlanId(plans[0].id);
+                          }}
+                          className={`flex-1 py-3 text-[10px] font-black uppercase tracking-widest rounded-xl transition-all ${newPlanType === "select" ? "bg-brand text-white shadow-lg shadow-brand/20" : "text-gray-500 hover:text-gray-300"}`}
+                        >
+                          Select Plan
+                        </button>
+                      </div>
+
+                      {newPlanType === "new" ? (
+                        <div className="space-y-6">
+                           <div>
+                              <label className="text-[10px] font-bold text-gray-500 uppercase tracking-widest mb-3 block">1. Plan Identity</label>
+                              <input 
+                                type="text"
+                                value={newPlanName}
+                                onChange={(e) => setNewPlanName(e.target.value)}
+                                className="w-full bg-[#141414] border border-white/5 rounded-2xl px-6 py-4 text-white font-bold focus:border-brand/40 outline-none transition-all placeholder:text-gray-700"
+                                placeholder="My Strategic Roadmap"
+                              />
+                           </div>
+                           <div>
+                              <label className="text-[10px] font-bold text-gray-500 uppercase tracking-widest mb-3 block">2. Roadmap Duration ({newPlanMonths} Months)</label>
+                              <input 
+                                type="range"
+                                min="1"
+                                max="12"
+                                value={newPlanMonths}
+                                onChange={(e) => setNewPlanMonths(parseInt(e.target.value))}
+                                className="w-full h-1.5 bg-white/5 rounded-full accent-brand appearance-none cursor-pointer"
+                              />
+                           </div>
+                        </div>
+                      ) : (
+                        <div className="space-y-3">
+                          <label className="text-[10px] font-bold text-gray-500 uppercase tracking-widest mb-2 block">Target Destination Plan</label>
+                          <select
+                            value={targetExistingPlanId}
+                            onChange={(e) => setTargetExistingPlanId(e.target.value)}
+                            className="w-full bg-[#141414] border border-white/5 rounded-xl px-4 py-4 text-sm text-white focus:border-brand/40 outline-none transition-all appearance-none cursor-pointer"
+                          >
+                            {plans.length === 0 && <option value="">No plans created yet</option>}
+                            {plans.map((p, i) => (
+                              <option key={`plan-opt-modal-${p.id}-${i}`} value={p.id}>{p.name} ({p.months}m)</option>
+                            ))}
+                          </select>
+                        </div>
+                      )}
+                    </div>
+
+                    {newPlanProjectId && (
+                      <div className="p-6 bg-[#111111] border border-white/5 rounded-[32px]">
+                         <div className="flex items-center justify-between mb-4">
+                            <h4 className="text-[10px] font-black text-brand uppercase tracking-widest">3. Select Target Month</h4>
+                         </div>
+                         <div className="grid grid-cols-6 gap-2">
+                            {Array.from({ length: 12 }).map((_, i) => (
+                              <button 
+                                key={`nm-box-${i}`}
+                                onClick={() => setNewPlanStartMonth(i + 1)}
+                                disabled={newPlanType === "new" && i + 1 > newPlanMonths}
+                                className={`h-10 rounded-xl border text-[10px] font-black transition-all ${
+                                  newPlanStartMonth === i + 1 
+                                  ? 'bg-brand text-white border-brand shadow-lg shadow-brand/20' 
+                                  : 'bg-white/5 border-white/5 text-gray-600 hover:border-white/10 disabled:opacity-10'
+                                }`}
+                              >
+                                {i + 1}
+                              </button>
+                            ))}
+                         </div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                <div className="flex gap-4 pt-8 border-t border-white/5 mt-8">
+                  <button onClick={() => setNewPlanModalOpen(false)} className="flex-1 py-4 text-xs font-bold text-gray-500 uppercase tracking-widest hover:text-white transition-colors">Cancel</button>
                   <button 
                     onClick={() => {
-                      if (newPlanType === "new") {
-                        if (newPlanName.trim()) {
-                          createPlan(newPlanName, newPlanMonths, newPlanProjectId || undefined, newPlanStartMonth);
-                          setNewPlanModalOpen(false);
+                        if (newPlanType === "new") {
+                            createPlan(newPlanName, newPlanMonths, newPlanProjectId || undefined, newPlanStartMonth, Object.keys(stagedMapping).length > 0 ? stagedMapping : undefined);
                         } else {
-                          alert("Please enter a plan name.");
+                            setAddMonthProjectId(newPlanProjectId);
+                            addMonthToPlan(targetExistingPlanId);
                         }
-                      } else {
-                        if (targetExistingPlanId) {
-                          // Reuse addMonth logic but with modal state
-                          setAddMonthProjectId(newPlanProjectId);
-                          addMonthToPlan(targetExistingPlanId);
-                          setNewPlanModalOpen(false);
-                        } else {
-                          alert("Please select a plan.");
-                        }
-                      }
+                        setNewPlanModalOpen(false);
                     }}
-                    className="flex-[1.5] px-6 py-4 rounded-2xl bg-brand text-white font-black text-[10px] uppercase tracking-widest hover:opacity-90 transition-opacity flex items-center justify-center gap-2 shadow-lg shadow-brand/20"
+                    className="flex-[2] bg-brand text-white font-black text-xs py-4 rounded-2xl hover:opacity-90 transition-all shadow-xl shadow-brand/20 flex items-center justify-center gap-2 uppercase tracking-widest italic"
                   >
-                    <PlusCircle className="w-4 h-4" /> Finalize Plan
+                    <PlusCircle className="w-5 h-5" /> Finalize Roadmap
                   </button>
                 </div>
               </div>
 
-              <div className="border-l border-white/5 pl-8 space-y-6">
-                <div>
-                  <label className="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-3 block">3. Select Initial Project (Optional)</label>
-                  <div className="grid gap-2 max-h-[220px] overflow-y-auto pr-1 flex-nowrap overflow-x-hidden">
-                    <button 
-                      onClick={() => setNewPlanProjectId("")}
-                      className={`w-full px-5 py-3 rounded-2xl border text-left transition-all ${
-                        newPlanProjectId === "" 
-                        ? 'bg-brand/10 border-brand text-brand shadow-lg shadow-brand/10' 
-                        : 'bg-[#1A1A1A] border-white/5 text-gray-500 hover:border-white/20'
-                      }`}
-                    >
-                      <div className="font-bold text-xs truncate uppercase tracking-tight">Empty / No Project</div>
-                      <div className="text-[9px] opacity-60 font-bold italic lowercase">start with a blank slate</div>
-                    </button>
-                    {projects.map(project => (
+              {/* Column 3: Project & Content Ideas (DAN SIDE) */}
+              <div className="col-span-12 lg:col-span-4 border-l border-white/5 bg-[#111111]/30 flex flex-col h-full overflow-hidden order-3">
+                <div className="p-8 border-b border-white/5">
+                   <h3 className="text-[10px] font-black text-gray-500 uppercase tracking-[0.2em] mb-4">2. Pick Content Strategy</h3>
+                   <div className="grid gap-2 max-h-[160px] overflow-y-auto pr-2 custom-scrollbar">
                       <button 
-                        key={project.id}
-                        onClick={() => setNewPlanProjectId(project.id)}
-                        className={`w-full px-5 py-3 rounded-2xl border text-left transition-all ${
-                          newPlanProjectId === project.id 
-                          ? 'bg-brand/10 border-brand text-brand shadow-lg shadow-brand/10' 
-                          : 'bg-[#1A1A1A] border-white/5 text-gray-500 hover:border-white/20'
-                        }`}
+                        onClick={() => {setNewPlanProjectId(""); setStagedMapping({});}}
+                        className={`w-full px-5 py-4 rounded-2xl border text-left transition-all ${newPlanProjectId === "" ? 'bg-brand/10 border-brand text-brand' : 'bg-white/5 border-white/5 text-gray-600'}`}
                       >
-                        <div className="font-bold text-xs truncate uppercase tracking-tight">{project.name}</div>
-                        <div className="text-[9px] opacity-60 font-bold uppercase tracking-widest">{project.preferences.style}</div>
+                        <div className="font-black text-[10px] uppercase tracking-widest">Blank Roadmap</div>
                       </button>
-                    ))}
-                  </div>
-                </div>
-
-                {newPlanProjectId && (
-                  <div>
-                    <label className="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-3 block">4. Target Month (1-{newPlanMonths})</label>
-                    <div className="grid grid-cols-4 gap-2">
-                      {Array.from({ length: newPlanMonths }).map((_, i) => (
+                      {projects.map((project, i) => (
                         <button 
-                          key={i}
-                          onClick={() => setNewPlanStartMonth(i + 1)}
-                          className={`flex flex-col items-center justify-center py-3 rounded-xl border transition-all ${
-                            newPlanStartMonth === i + 1 
-                            ? 'bg-brand text-white border-brand font-black' 
-                            : 'bg-white/5 border-white/5 text-gray-400 hover:border-white/20'
-                          }`}
+                          key={`np-proj-list-${project.id}-${i}`}
+                          onClick={() => {setNewPlanProjectId(project.id); setStagedMapping({}); setSelectedIdeaForMapping(null);}}
+                          className={`w-full px-5 py-4 rounded-2xl border text-left transition-all ${newPlanProjectId === project.id ? 'bg-brand/10 border-brand text-brand shadow-lg shadow-brand/10' : 'bg-white/5 border-white/5 text-gray-600'}`}
                         >
-                          <span className="text-[8px] font-bold uppercase tracking-tighter opacity-70">Month</span>
-                          <span className="text-sm font-display font-black leading-none">{i + 1}</span>
+                          <div className="font-black text-[10px] truncate uppercase tracking-widest">{project.name}</div>
                         </button>
                       ))}
-                    </div>
-                  </div>
-                )}
+                   </div>
+                </div>
+
+                <div className="flex-1 overflow-y-auto p-8 space-y-4 custom-scrollbar bg-[#080808]">
+                   {newPlanProjectId ? (
+                      <>
+                        <div className="flex justify-between items-center mb-4">
+                           <h4 className="text-[10px] font-black text-gray-500 uppercase tracking-widest">Select Strategy Item</h4>
+                           <button onClick={() => {
+                               const project = projects.find(p => p.id === newPlanProjectId);
+                               if (project?.calendar) {
+                                  const newMap: Record<number, any> = {};
+                                  project.calendar.calendar.forEach((item, idx) => { if (idx < 30) newMap[idx] = { title: item.title, hook: item.hook }; });
+                                  setStagedMapping(newMap);
+                               }
+                           }} className="text-[9px] font-bold text-brand uppercase hover:underline">Auto-Fill All</button>
+                        </div>
+                        <div className="grid gap-2">
+                          {projects.find(p => p.id === newPlanProjectId)?.calendar.calendar.map((item, idx) => (
+                            <button 
+                              key={`modal-idea-list-${idx}`}
+                              onClick={() => setSelectedIdeaForMapping(idx)}
+                              className={`w-full px-4 py-3 rounded-2xl border text-left transition-all group ${selectedIdeaForMapping === idx ? 'bg-brand border-brand text-white shadow-xl shadow-brand/30 scale-[1.02]' : 'bg-[#141414] border-white/5 hover:border-white/20'}`}
+                            >
+                               <div className="flex justify-between items-center mb-1.5">
+                                  <span className={`text-[7px] font-black uppercase tracking-widest px-1.5 py-0.5 rounded ${selectedIdeaForMapping === idx ? 'bg-white/20' : 'bg-white/5 text-gray-500'}`}>D{item.day}</span>
+                                  {Object.values(stagedMapping).some((m: any) => m.title === item.title) && (
+                                     <div className="flex items-center gap-1">
+                                        <Check className="w-2.5 h-2.5 text-brand" />
+                                        <span className="text-[7px] font-bold text-brand uppercase">Mapped</span>
+                                     </div>
+                                  )}
+                               </div>
+                               <h5 className={`text-[12px] font-bold italic leading-tight ${selectedIdeaForMapping === idx ? 'text-white' : 'text-gray-300 group-hover:text-white'}`}>
+                                 {truncateText(item.title, 35)}
+                               </h5>
+                            </button>
+                          ))}
+                        </div>
+                      </>
+                   ) : (
+                      <div className="h-full flex flex-col items-center justify-center opacity-20"><Sparkles className="w-12 h-12 mb-4 text-brand" /><p className="text-xs font-bold uppercase tracking-widest">Select project<br/>to start mapping</p></div>
+                   )}
+                </div>
               </div>
             </motion.div>
           </div>
@@ -2403,9 +2831,9 @@ export default function App() {
                       <div className="font-bold text-xs truncate uppercase tracking-tight">Empty / No Project</div>
                       <div className="text-[9px] opacity-60 font-bold italic lowercase">start with a blank slate</div>
                     </button>
-                    {projects.map(project => (
+                    {projects.map((project, i) => (
                       <button 
-                        key={project.id}
+                        key={`add-month-proj-${project.id}-${i}`}
                         onClick={() => setAddMonthProjectId(project.id)}
                         className={`w-full px-5 py-3 rounded-2xl border text-left transition-all ${
                           addMonthProjectId === project.id 
@@ -2466,11 +2894,11 @@ export default function App() {
               <div className="space-y-8">
                 <div>
                   <label className="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-3 block">1. Select Destination Plan</label>
-                  <div className="grid gap-2 max-h-[140px] overflow-y-auto pr-1 flex-nowrap overflow-x-hidden">
-                    {plans.map(plan => (
-                      <button 
-                        key={plan.id}
-                        onClick={() => setSelectedPlanForAdd(plan.id)}
+                    <div className="grid gap-2 max-h-[140px] overflow-y-auto pr-1 flex-nowrap overflow-x-hidden">
+                      {plans.map((plan, i) => (
+                        <button 
+                          key={`plan-picker-item-${plan.id}-${i}`}
+                          onClick={() => setSelectedPlanForAdd(plan.id)}
                         className={`w-full px-5 py-3 rounded-2xl border text-left transition-all ${
                           selectedPlanForAdd === plan.id 
                           ? 'bg-brand/10 border-brand text-brand shadow-lg shadow-brand/10' 
@@ -2486,52 +2914,94 @@ export default function App() {
 
                 {selectedPlanForAdd && (
                   <div>
-                    <label className="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-3 block">2. Choose Start Month (1-12)</label>
-                    <div className="grid grid-cols-4 gap-2">
-                      {Array.from({ length: plans.find(p => p.id === selectedPlanForAdd)?.months || 0 }).map((_, i) => {
-                        const monthNum = i + 1;
-                        const plan = plans.find(p => p.id === selectedPlanForAdd);
-                        const startDay = (monthNum - 1) * 30 + 1;
-                        const endDay = monthNum * 30;
-                        const isMonthOccupied = plan?.days.some(day => {
-                          const planStart = new Date(plan.startDate).getTime();
-                          const dayDate = new Date(day.date).getTime();
-                          const dNum = Math.floor((dayDate - planStart) / (1000 * 60 * 60 * 24)) + 1;
-                          return dNum >= startDay && dNum <= endDay && day.title.trim() !== "";
-                        });
+                    <label className="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-3 block">2. Choose Start Month & Day</label>
+                    <div className="flex flex-col gap-4">
+                      {/* Month Selector */}
+                      <div className="grid grid-cols-4 gap-2">
+                        {(() => {
+                           const plan = plans.find(p => p.id === selectedPlanForAdd);
+                           return Array.from({ length: plan?.months || 0 }).map((_, i) => {
+                            const monthNum = i + 1;
+                            const startDayOfM = (monthNum - 1) * 30 + 1;
+                            const endDayOfM = monthNum * 30;
+                            const isMonthMostlyOccupied = plan?.days.some(day => {
+                              const planStart = new Date(plan.startDate).getTime();
+                              const dayDate = new Date(day.date).getTime();
+                              const dNum = Math.floor((dayDate - planStart) / (1000 * 60 * 60 * 24)) + 1;
+                              return dNum >= startDayOfM && dNum <= endDayOfM && day.title.trim() !== "";
+                            });
 
-                        return (
-                          <button 
-                            key={i}
-                            disabled={isMonthOccupied}
-                            onClick={() => setSelectedMonthForAdd(monthNum)}
-                            className={`flex flex-col items-center justify-center py-4 rounded-xl border relative transition-all ${
-                              selectedMonthForAdd === monthNum 
-                              ? 'bg-brand text-white border-brand font-black' 
-                              : isMonthOccupied
-                                ? 'bg-red-500/5 border-red-500/20 text-red-500/40 cursor-not-allowed'
-                                : 'bg-white/5 border-white/5 text-gray-400 hover:border-white/20'
-                            }`}
-                          >
-                            <span className="text-[9px] font-bold uppercase tracking-tighter opacity-70">Month</span>
-                            <span className="text-lg font-display font-black leading-none">{monthNum}</span>
-                            {isMonthOccupied && (
-                              <div className="absolute -top-1.5 -right-1.5 bg-red-500 text-[8px] font-black italic px-1 rounded uppercase">Used</div>
-                            )}
-                          </button>
-                        );
-                      })}
+                            return (
+                              <button 
+                                key={`month-picker-btn-${selectedPlanForAdd}-${i}`}
+                                onClick={() => setSelectedMonthForAdd(monthNum)}
+                                className={`flex flex-col items-center justify-center py-3 rounded-xl border relative transition-all ${
+                                  selectedMonthForAdd === monthNum 
+                                  ? 'bg-brand text-white border-brand font-black' 
+                                  : isMonthMostlyOccupied
+                                    ? 'bg-brand/5 border-brand/20 text-brand/60'
+                                    : 'bg-white/5 border-white/5 text-gray-400 hover:border-white/20'
+                                }`}
+                              >
+                                <span className="text-[8px] font-bold uppercase tracking-tighter opacity-70 leading-none mb-1">M</span>
+                                <span className="text-sm font-display font-black leading-none">{monthNum}</span>
+                                {isMonthMostlyOccupied && (
+                                  <div className="absolute -top-1 -right-1 w-1.5 h-1.5 bg-brand rounded-full" />
+                                )}
+                              </button>
+                            );
+                          });
+                        })()}
+                      </div>
+
+                      {/* Day Selector (1-30) */}
+                      <div className="space-y-2">
+                        <div className="flex justify-between items-center px-1">
+                          <span className="text-[9px] font-black text-gray-500 uppercase tracking-widest">Start on Day {selectedDayForAdd} of Month {selectedMonthForAdd}</span>
+                        </div>
+                        <div className="grid grid-cols-10 gap-1.5">
+                          {(() => {
+                             const plan = plans.find(p => p.id === selectedPlanForAdd);
+                             return Array.from({ length: 30 }).map((_, i) => {
+                              const dayNum = i + 1;
+                              const absoluteDay = (selectedMonthForAdd - 1) * 30 + dayNum;
+                              const d = new Date(plan?.startDate || '');
+                              d.setDate(d.getDate() + absoluteDay - 1);
+                              const dateStr = d.toISOString().split('T')[0];
+                              const isDayOccupied = plan?.days.some(day => day.date === dateStr && day.title.trim() !== "");
+
+                              return (
+                                <button 
+                                  key={`day-picker-btn-${selectedPlanForAdd}-${selectedMonthForAdd}-${i}`}
+                                  onClick={() => setSelectedDayForAdd(dayNum)}
+                                  className={`flex items-center justify-center h-8 rounded-lg border text-[10px] font-black transition-all ${
+                                    selectedDayForAdd === dayNum 
+                                    ? 'bg-brand text-white border-brand scale-110 z-10' 
+                                    : isDayOccupied
+                                      ? 'bg-red-500/10 border-red-500/20 text-red-500'
+                                      : 'bg-white/5 border-white/5 text-gray-500 hover:border-white/20'
+                                  }`}
+                                >
+                                  {dayNum}
+                                </button>
+                              );
+                            });
+                          })()}
+                        </div>
+                      </div>
                     </div>
                     {plans.find(p => p.id === selectedPlanForAdd)?.days.some(day => {
                         const plan = plans.find(p => p.id === selectedPlanForAdd);
-                        const startDay = (selectedMonthForAdd - 1) * 30 + 1;
-                        const endDay = selectedMonthForAdd * 30;
+                        const startAbsDay = (selectedMonthForAdd - 1) * 30 + selectedDayForAdd;
                         const planStart = new Date(plan!.startDate).getTime();
                         const dayDate = new Date(day.date).getTime();
                         const dNum = Math.floor((dayDate - planStart) / (1000 * 60 * 60 * 24)) + 1;
-                        return dNum >= startDay && dNum <= endDay && day.title.trim() !== "";
+                        
+                        // Check if this day is within the 30 day range we're about to add
+                        const rangeSize = markedIdeas.length > 0 ? markedIdeas.length : 30;
+                        return dNum >= startAbsDay && dNum < startAbsDay + rangeSize && day.title.trim() !== "";
                     }) && (
-                        <p className="text-[10px] text-red-500 mt-3 font-bold italic">* This month already has a content strategy.</p>
+                        <p className="text-[10px] text-red-500 mt-3 font-bold italic line-clamp-2">* Some selected days already have a content strategy. Overwriting common for individual adds but blocked for batch.</p>
                     )}
                   </div>
                 )}
@@ -2630,7 +3100,7 @@ export default function App() {
                             "Summarize my content roadmap"
                         ].map(suggestion => (
                             <button 
-                                key={suggestion}
+                                key={`chat-suggestion-${suggestion}`}
                                 onClick={() => setChatInput(suggestion)}
                                 className="px-4 py-3 rounded-xl bg-white/5 border border-white/5 text-[10px] text-gray-400 font-bold uppercase tracking-widest hover:bg-brand/5 hover:border-brand/20 hover:text-brand transition-all text-left"
                             >
@@ -2640,8 +3110,8 @@ export default function App() {
                     </div>
                   </div>
                 )}
-                {chatMessages.map(msg => (
-                  <div key={msg.id} className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}>
+                {chatMessages.map((msg, i) => (
+                  <div key={`${msg.id}-${i}`} className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}>
                     <div className={`max-w-[85%] p-4 rounded-3xl ${
                         msg.role === "user" 
                         ? "bg-brand text-white font-medium rounded-tr-none shadow-lg shadow-brand/10" 
